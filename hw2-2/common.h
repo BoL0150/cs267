@@ -12,7 +12,6 @@
 #define cutoff   0.01
 #define min_r    (cutoff / 100)
 #define dt       0.0005
-#define bin_size cutoff
 #define BIN_PARTS_NUM 3
 
 // Particle Data Structure

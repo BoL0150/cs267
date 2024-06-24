@@ -61,6 +61,7 @@ void init_particles(particle_t* parts, int num_parts, double size, int part_seed
 
     for (int i = 0; i < num_parts; ++i) {
         parts[i].id = i + 1;
+        // printf("part id:%d %f %f\n",parts[i].id, parts[i].x, parts[i].y);
     }
 }
 
@@ -102,7 +103,6 @@ MPI_Datatype PARTICLE;
 
 int main(int argc, char** argv) {
     // Parse Args
-    printf("fuckyou \n");
     if (find_arg_idx(argc, argv, "-h") >= 0) {
         std::cout << "Options:" << std::endl;
         std::cout << "-h: see this help" << std::endl;
@@ -122,7 +122,6 @@ int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
     MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-
     // Create MPI Particle Type
     // 结构体PARTICLE中的成员数量
     const int nitems = 8;

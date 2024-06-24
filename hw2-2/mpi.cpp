@@ -1,3 +1,5 @@
+#include <iostream>
+#include <unistd.h>
 #include <cassert>
 #include "common.h"
 #include <algorithm>
@@ -8,6 +10,7 @@
 std::vector<particle_t*> local_parts;
 double block_x1, block_x2, block_y1, block_y2;
 double ghost_block_x1, ghost_block_x2, ghost_block_y1, ghost_block_y2;
+int ghost_bin_global_x1, ghost_bin_global_y1;
 std::vector<std::vector<bin>> local_bins;
 double local_size;
 int bin_height;
@@ -15,6 +18,7 @@ int rank_x;
 int rank_y;
 int x_proc_nums;
 int total_proc_nums;
+double bin_size;
 bool check_local_part(particle_t* part) {
     if (block_x1 <= part->x && part->x < block_x2 && block_y1 <= part->y && part->y < block_y2) {
         return true;
@@ -30,6 +34,11 @@ int get_local_bin_x(double global_x) {
 }
 
 int get_local_bin_y(double global_y) {
+    if (!(global_y  >= block_y1 && global_y <= block_y2)) {
+        std::cout << "*********global_y:" << global_y << std::endl;
+        std::cout << "*********block_y1:" << block_y1 << std::endl;
+        std::cout << "*********block_y2:" << block_y2 << std::endl;
+    }
     assert(global_y >= block_y1 && global_y <= block_y2);
     double local_offset_y = global_y - block_y1;
     int bin_y = floor(local_offset_y / bin_size);
@@ -41,14 +50,28 @@ bin* get_local_bin(double x, double y) {
     assert(bin_x >= 1 && bin_x <= bin_height - 2 && bin_y >= 1 && bin_y <= bin_height - 2);
     return &local_bins[bin_x][bin_y];
 }
-bin* get_local_and_ghost_bin(double x, double y) {
+bin* get_local_and_ghost_bin(double x, double y, bool* is_ghost) {
     assert(x >= ghost_block_x1 && x <= ghost_block_x2 && y >= ghost_block_y1 && y <= ghost_block_y2);
     if (x >= block_x1 && x <= block_x2 && y >= block_y1 && y <= block_y2) {
+        *is_ghost = false;
         return get_local_bin(x, y);
     }
+    *is_ghost = true;
     int bin_x = floor((x - ghost_block_x1) / bin_size);
     int bin_y = floor((y - ghost_block_y1) / bin_size);
-    assert((bin_x == 0 || bin_x == bin_height - 1) && (bin_y == 0 || bin_y == bin_height - 1));
+    // printf("local ghost bin x:%d, y:%d\n", bin_x, bin_y);
+    if (!((bin_x == 0 || bin_x == bin_height - 1) || (bin_y == 0 || bin_y == bin_height - 1))) {
+        printf("local ghost bin x:%d, y:%d\n", bin_x, bin_y);
+        std::cout << "*********x:" << x << std::endl;
+        std::cout << "*********y:" << y << std::endl;
+        std::cout << "*********block_y1:" << block_y1 << std::endl;
+        std::cout << "*********block_y2:" << block_y2 << std::endl;
+        std::cout << "*********block_x1:" << block_x1 << std::endl;
+        std::cout << "*********block_x2:" << block_x2 << std::endl;
+        std::cout << "*********ghost_block_y1:" << ghost_block_y1 << std::endl;
+        std::cout << "*********ghost_block_x1:" << ghost_block_x1 << std::endl;
+    }
+    assert((bin_x == 0 || bin_x == bin_height - 1) || (bin_y == 0 || bin_y == bin_height - 1));
     bin* ghost_bin = &local_bins[bin_x][bin_y];
     return ghost_bin;
 }
@@ -78,10 +101,14 @@ void distribute_to_local_bins(particle_t* parts, int num_parts) {
             }
         }
     }
+    int cur_rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &cur_rank);
     for (int i = 0; i < num_parts; i++) {
         particle_t* cur_part = &parts[i];
         if (check_local_part(cur_part)) {
             auto bin_ptr = get_local_bin(cur_part->x, cur_part->y);
+            // if (cur_part->id == 5) printf("%f %f\n", cur_part->x, cur_part->y);
+            // printf("parts %d is rank %d local_part, local_bin_x %d ,local_bin_y %d \n", cur_part->id, cur_rank, get_local_bin_x(cur_part->x), get_local_bin_y(cur_part->y));
             particle_t* res = copy_part_to_local_bin(bin_ptr, cur_part);
             local_parts.push_back(res);
         }
@@ -99,9 +126,18 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
     total_proc_nums = x_proc_nums * y_proc_nums;
     local_size = size / x_proc_nums;
     // 多两行和两列，ghost particles，便于从其他进程获取数据
+    bin_size = cutoff;
+    bin_size = local_size / (int)floor(local_size / bin_size);
     bin_height = (int)ceil(local_size / bin_size) + 2;
+    printf("bin_size:%f, bin_height:%d, local size %f\n", bin_size, bin_height, local_size);
+
     rank_x = rank / y_proc_nums;
     rank_y = rank % y_proc_nums;
+    // 计算全局的bin的x和y
+    ghost_bin_global_x1 = (bin_height - 2) * rank_x - 1;
+    ghost_bin_global_y1 = (bin_height - 2) * rank_y - 1;
+    // printf("ghost_bin_global_x1 %d\n", ghost_bin_global_x1);
+    // printf("ghost_bin_global_y1 %d\n", ghost_bin_global_y1);
     block_x1 = rank_x * local_size;
     block_x2 = (rank_x + 1) * local_size;
     block_y1 = rank_y * local_size;
@@ -153,6 +189,9 @@ void apply_force(particle_t& particle, particle_t& neighbor) {
 void apply_force_to_bin(bin *neighbor_bin, particle_t* cur_part) {
     for (int i = 0; i < BIN_PARTS_NUM; i++) {
         if (!neighbor_bin->parts[i].valid) continue;
+        // if (cur_part->id == 5) {
+        //     printf("part 5's neighbor:%d\n", neighbor_bin->parts[i].id);
+        // }
         apply_force(*cur_part, neighbor_bin->parts[i]);
     }
 }
@@ -200,29 +239,79 @@ void move(particle_t& p, double size) {
 int get_1D_rank(int x, int y) {
     return x * x_proc_nums + y;
 }
-void mpi_sendrecv_warpper(bin *sendbuf, int dest, bin *recvbuf, int source, bool update) {
+// void mpi_sendrecv_warpper(int dest, int send_i, int send_j, int recv_i, int recv_j, int source, bool update) {
+//     // printf("rank %d send %d,%d recv %d,%d to rank %d\n", source, send_i, send_j, recv_i, recv_j, dest);
+//     bin *sendbuf = &local_bins[send_i][send_j];
+//     bin *recvbuf = &local_bins[recv_i][recv_j];
+//     if (!update) {
+//         MPI_Sendrecv(sendbuf, 1, BIN, dest, 0, recvbuf, 1, BIN, source, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+//         // printf("rank %d send %d,%d recv %d,%d to rank %d\n", source, send_i, send_j, recv_i, recv_j, dest);
+//         return;
+//     } 
+//     // 如果是update的话就要把之前发出去的bin收回来，更新自己本地的bin，然后也要把之前接收的bin发回去
+//     bin temp;
+//     MPI_Sendrecv(recvbuf, 1, BIN, dest, 0, &temp, 1, BIN, source, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+//     for (int i = 0; i < BIN_PARTS_NUM; i++) {
+//         if (temp.parts[i].valid) {
+//             for (int j = 0; j < BIN_PARTS_NUM; j++) {
+//                 if (!sendbuf->parts[j].valid) {
+//                     sendbuf->parts[j] = temp.parts[i];
+//                     sendbuf->parts[j].valid = true;
+//                     break;
+//                 } else {
+//                     assert(temp.parts[i].id != sendbuf->parts[j].id);
+//                 }
+//             }
+//         }
+//     }
+// 
+// }
+int get_1D_bin_global_idx(int x, int y) {
+    assert (x >= 0 && y >= 0);
+    return x * ((bin_height - 2) * x_proc_nums) + y;
+}
+void send(int dest, int send_i, int send_j, int source) {
+    int bin_global_idx = get_1D_bin_global_idx(send_i + ghost_bin_global_x1, send_j + ghost_bin_global_y1);
+    // printf("rank %d send %d,%d , global idx(tag):%d to rank %d\n", source, send_i, send_j, bin_global_idx, dest);
+    bin *sendbuf = &local_bins[send_i][send_j];
+    // MPI_Request request;
+    MPI_Send(sendbuf, 1, BIN, dest, bin_global_idx, MPI_COMM_WORLD);
+    // MPI_Send(sendbuf, 1, BIN, dest, bin_global_idx, MPI_COMM_WORLD);
+    // printf("rank %d finish send %d,%d , global idx(tag):%d to rank %d\n", source, send_i, send_j, bin_global_idx, dest);
+}
+void printf_status(int source, MPI_Status *status) {
+    std::cout << source << " count_lo " << status->count_lo << " count_hi_and cacelled " << status->count_hi_and_cancelled << " MPI_SOURCE: " << status->MPI_SOURCE << " MPI_TAG " << status->MPI_TAG << std::endl;
+}
+void recv(int dest, int recv_i, int recv_j, int source, bool update) {
+    int bin_global_idx = get_1D_bin_global_idx(recv_i + ghost_bin_global_x1, recv_j + ghost_bin_global_y1);
+    // printf("rank %d recv %d,%d , global idx(tag):%d, from rank %d\n", source, recv_i, recv_j, bin_global_idx, dest);
+    bin *recvbuf = &local_bins[recv_i][recv_j];
     if (!update) {
-        MPI_Sendrecv(sendbuf, 1, BIN, dest, 0, recvbuf, 1, BIN, source, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Recv(recvbuf, 1, BIN, dest, bin_global_idx, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        // printf("rank %d finish recv %d,%d , global idx(tag):%d, from rank %d\n", source, recv_i, recv_j, bin_global_idx, dest);
         return;
-    } 
-    // 如果是update的话就要把之前发出去的bin收回来，更新自己本地的bin，然后也要把之前接收的bin发回去
+    }
     bin temp;
-    MPI_Sendrecv(recvbuf, 1, BIN, dest, 0, &temp, 1, BIN, source, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    MPI_Recv(&temp, 1, BIN, dest, bin_global_idx, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    // 更新recvbuf，遍历temp的所有粒子，如果recvbuf有空的位子就把粒子加入
     for (int i = 0; i < BIN_PARTS_NUM; i++) {
         if (temp.parts[i].valid) {
             for (int j = 0; j < BIN_PARTS_NUM; j++) {
-                if (!sendbuf->parts[j].valid) {
-                    sendbuf->parts[j] = temp.parts[i];
-                    sendbuf->parts[j].valid = true;
+                if (!recvbuf->parts[j].valid) {
+                    recvbuf->parts[j] = temp.parts[i];
+                    recvbuf->parts[j].valid = true;
+                    local_parts.push_back(&recvbuf->parts[j]);
                     break;
                 } else {
-                    assert(temp.parts[i].id != sendbuf->parts[j].id);
+                    assert(temp.parts[i].id != recvbuf->parts[j].id);
                 }
             }
         }
     }
+
+    // printf("rank %d finish recv %d,%d , global idx(tag):%d, from rank %d\n", source, recv_i, recv_j, bin_global_idx, dest);
 }
-void communicate(int rank, bool update) {
+void send_to_neighbor(int rank, bool update) {
     for (int i = 0; i < bin_height; i++) {
         for (int j = 0; j < bin_height; j++) {
             if (i > 0 && i < bin_height - 1 && j > 0 && j < bin_height - 1) continue;
@@ -232,32 +321,133 @@ void communicate(int rank, bool update) {
             if (j == bin_height - 1 && rank_y == x_proc_nums - 1) continue;
             if (i == 0 && j == 0) {
                 int dest = get_1D_rank(rank_x - 1, rank_y - 1);
-                mpi_sendrecv_warpper(&local_bins[1][1], dest, &local_bins[i][j], rank, update);
+                // mpi_sendrecv_warpper(&local_bins[1][1], dest, &local_bins[i][j], rank, update);
+                // mpi_sendrecv_warpper(dest, 1, 1, i, j, rank, update);
+                if (!update) {
+                    send(dest, 1, 1, rank);
+                } else {
+                    recv(dest, 1, 1, rank, update);
+                }
             } else if (i == 0 && j == bin_height - 1) {
                 int dest = get_1D_rank(rank_x - 1, rank_y + 1);
-                mpi_sendrecv_warpper(&local_bins[1][bin_height - 2], dest, &local_bins[i][j], rank, update);
+                // mpi_sendrecv_warpper(&local_bins[1][bin_height - 2], dest, &local_bins[i][j], rank);
+                // mpi_sendrecv_warpper(dest, 1, bin_height - 2, i, j, rank);
+                if (!update) {
+                    send(dest, 1, bin_height - 2, rank);
+                } else {
+                    recv(dest, 1, bin_height - 2, rank, update);
+                }
             } else if (i == bin_height - 1 && j == 0) {
                 int dest = get_1D_rank(rank_x + 1, rank_y - 1);
-                mpi_sendrecv_warpper(&local_bins[bin_height - 2][1], dest, &local_bins[i][j], rank, update);
+                // mpi_sendrecv_warpper(&local_bins[bin_height - 2][1], dest, &local_bins[i][j], rank);
+                // mpi_sendrecv_warpper(dest, bin_height - 2, 1, i, j, rank);
+                if (!update) {
+                    send(dest, bin_height - 2, 1, rank);
+                } else {
+                    recv(dest, bin_height - 2, 1, rank, update);
+                }
             } else if (i == bin_height - 1 && j == bin_height - 1) {
                 int dest = get_1D_rank(rank_x + 1, rank_y + 1);
-                mpi_sendrecv_warpper(&local_bins[bin_height - 2][bin_height - 2], dest, &local_bins[i][j], rank, update);
+                // mpi_sendrecv_warpper(&local_bins[bin_height - 2][bin_height - 2], dest, &local_bins[i][j], rank);
+                // mpi_sendrecv_warpper(dest, bin_height - 2, bin_height - 2, i, j, rank);
+                if (!update) {
+                    send(dest, bin_height - 2, bin_height - 2, rank);
+                } else {
+                    recv(dest, bin_height - 2, bin_height - 2, rank, update);
+                }
             } else if (i == 0) {
                 int dest = get_1D_rank(rank_x - 1, rank_y);
-                mpi_sendrecv_warpper(&local_bins[1][j], dest, &local_bins[i][j], rank, update);
+                // mpi_sendrecv_warpper(&local_bins[1][j], dest, &local_bins[i][j], rank);
+                if (!update) {
+                    send(dest, 1, j, rank);
+                } else {
+                    recv(dest, 1, j, rank, update);
+                }
             } else if (j == 0) {
                 int dest = get_1D_rank(rank_x, rank_y - 1);
-                mpi_sendrecv_warpper(&local_bins[i][1], dest, &local_bins[i][j], rank, update);
+                // mpi_sendrecv_warpper(&local_bins[i][1], dest, &local_bins[i][j], rank);
+                if (!update) {
+                    send(dest, i, 1, rank);
+                } else {
+                    recv(dest, i, 1, rank, update);
+                }
             } else if (i == bin_height - 1) {
                 int dest = get_1D_rank(rank_x + 1, rank_y);
-                mpi_sendrecv_warpper(&local_bins[bin_height - 2][j], dest, &local_bins[i][j], rank, update);
+                // mpi_sendrecv_warpper(&local_bins[bin_height - 2][j], dest, &local_bins[i][j], rank);
+                if (!update) {
+                    send(dest, bin_height - 2, j, rank);
+                } else {
+                    recv(dest, bin_height - 2, j, rank, update);
+                }
             } else {
                 int dest = get_1D_rank(rank_x, rank_y + 1);
-                mpi_sendrecv_warpper(&local_bins[i][bin_height - 2], dest, &local_bins[i][j], rank, update);
+                // mpi_sendrecv_warpper(&local_bins[i][bin_height - 2], dest, &local_bins[i][j], rank);
+                if (!update) {
+                    send(dest, i, bin_height - 2, rank);
+                } else {
+                    recv(dest, i, bin_height - 2, rank, update);
+                }
             }
         }
     }
 
+}
+void recv_from_neighbor(int rank, bool update) {
+    for (int i = 0; i < bin_height; i++) {
+        for (int j = 0; j < bin_height; j++) {
+            int dest;
+            if (i > 0 && i < bin_height - 1 && j > 0 && j < bin_height - 1) continue;
+            if (i == 0 && rank_x == 0) continue;
+            if (i == bin_height - 1 && rank_x == x_proc_nums - 1) continue;
+            if (j == 0 && rank_y == 0) continue;
+            if (j == bin_height - 1 && rank_y == x_proc_nums - 1) continue;
+            if (i == 0 && j == 0) {
+                dest = get_1D_rank(rank_x - 1, rank_y - 1);
+                // mpi_sendrecv_warpper(&local_bins[1][1], dest, &local_bins[i][j], rank, update);
+                // mpi_sendrecv_warpper(dest, 1, 1, i, j, rank, update);
+            } else if (i == 0 && j == bin_height - 1) {
+                dest = get_1D_rank(rank_x - 1, rank_y + 1);
+                // mpi_sendrecv_warpper(&local_bins[1][bin_height - 2], dest, &local_bins[i][j], rank, update);
+                // mpi_sendrecv_warpper(dest, 1, bin_height - 2, i, j, rank, update);
+            } else if (i == bin_height - 1 && j == 0) {
+                dest = get_1D_rank(rank_x + 1, rank_y - 1);
+                // mpi_sendrecv_warpper(&local_bins[bin_height - 2][1], dest, &local_bins[i][j], rank, update);
+                // mpi_sendrecv_warpper(dest, bin_height - 2, 1, i, j, rank, update);
+            } else if (i == bin_height - 1 && j == bin_height - 1) {
+                dest = get_1D_rank(rank_x + 1, rank_y + 1);
+                // mpi_sendrecv_warpper(&local_bins[bin_height - 2][bin_height - 2], dest, &local_bins[i][j], rank, update);
+                // mpi_sendrecv_warpper(dest, bin_height - 2, bin_height - 2, i, j, rank, update);
+            } else if (i == 0) {
+                dest = get_1D_rank(rank_x - 1, rank_y);
+                // mpi_sendrecv_warpper(&local_bins[1][j], dest, &local_bins[i][j], rank, update);
+            } else if (j == 0) {
+                dest = get_1D_rank(rank_x, rank_y - 1);
+                // mpi_sendrecv_warpper(&local_bins[i][1], dest, &local_bins[i][j], rank, update);
+            } else if (i == bin_height - 1) {
+                dest = get_1D_rank(rank_x + 1, rank_y);
+                // mpi_sendrecv_warpper(&local_bins[bin_height - 2][j], dest, &local_bins[i][j], rank, update);
+            } else {
+                dest = get_1D_rank(rank_x, rank_y + 1);
+                // mpi_sendrecv_warpper(&local_bins[i][bin_height - 2], dest, &local_bins[i][j], rank, update);
+            }
+            if (!update) {
+                recv(dest, i, j, rank, update);
+            } else {
+                send(dest, i, j, rank);
+            }
+        }
+    }
+
+}
+void communicate(int rank, bool update) {
+    // printf("********rank %d communicate**********\n", rank);
+    if (!update) {
+        send_to_neighbor(rank, update);
+        recv_from_neighbor(rank, update);
+    } else {
+        recv_from_neighbor(rank, update);
+        send_to_neighbor(rank, update);
+    }
 }
 void clear_ghost_bin() {
     for (int i = 0; i < bin_height; i++) {
@@ -273,6 +463,7 @@ void clear_ghost_bin() {
 void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
     // 让多余的proc空闲
     if (rank >= total_proc_nums) return;
+    // printf("simulate one step \n");
     // 和周围的进程通信，获取ghost bin，这些ghost bin只存在于local_bins数组中，他们的particle不需要加入local_parts中
     communicate(rank, false);
     // Compute Forces
@@ -280,20 +471,37 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
     // 在move之前把ghost bin中的粒子清空，从而方便后面将ghost bin发送回去之后其他进程更新自己的bin
     clear_ghost_bin();
     // 移动粒子，只负责移动本地的粒子，有可能会移动到ghost particle中，ghost particle中的粒子只会多不会少
-    for (int i = 0; i < local_parts.size(); ++i) {
-        particle_t *cur_part = local_parts[i];
+    for (auto it = local_parts.begin(); it != local_parts.end();) {
+        particle_t *cur_part = *it;
         bin* old_bin = get_local_bin(cur_part->x, cur_part->y);
         move(*cur_part, size);
+        // if (cur_part->id == 5) {
+            // printf("######rank %d local_parts size %d\n",rank, local_parts.size());
+            // printf("******part %d after move :%f %f\n", cur_part->id, cur_part->x, cur_part->y);
+        // }
         // printf("parts %d position: x %f,y %f\n", i, parts[i].x,parts[i].y);
-        bin* new_bin = get_local_and_ghost_bin(cur_part->x, cur_part->y);
-        if (old_bin == new_bin) continue;
-        // 目前part保存在old_bin中，所以是将old_bin中的valid变成false
-        cur_part->valid = false;
-        // 将local_parts中的旧的指针替换成新的bin中的part的指针
-        local_parts[i] = copy_part_to_local_bin(new_bin, cur_part);
+        bool is_ghost;
+        bin* new_bin = get_local_and_ghost_bin(cur_part->x, cur_part->y, &is_ghost);
+        if (old_bin != new_bin) {
+            // 目前part保存在old_bin中，所以是将old_bin中的valid变成false
+            cur_part->valid = false;
+            // 如果新的bin不是ghost，那么就将local_parts中的旧的指针替换成新的bin中的part的指针
+            particle_t *new_part = copy_part_to_local_bin(new_bin, cur_part);
+            if (!is_ghost) {
+                *it = new_part;
+                it++;
+            } else { // 如果新的bin是ghost，那么parts就移动到了当前proc的范围之外了，需要从local_parts中移除
+                it = local_parts.erase(it);
+            }
+        } else {
+            it++;
+        }
     }
     // 在move之后把之前发出去的bin收回来，更新自己本地的bin，然后也要把之前接收的bin发回去
+    // printf("update************\n");
     communicate(rank, true);
+    MPI_Barrier(MPI_COMM_WORLD);
+    // printf("finish update************\n");
 }
 
 void gather_for_save(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
@@ -301,16 +509,35 @@ void gather_for_save(particle_t* parts, int num_parts, double size, int rank, in
     // processor has an in-order view of all particles. That is, the array
     // parts is complete and sorted by particle id.
     int send_parts_num = local_parts.size();
+    // printf("gather************,rank %d send parts num:%d\n", rank, send_parts_num);
     particle_t send_buf[send_parts_num];
     for (int i = 0; i < send_parts_num; i++) {
         send_buf[i] = *local_parts[i];
     }
+    int send_parts_num_v[num_procs];
+    int displys[num_procs];
+    MPI_Gather(&send_parts_num, 1, MPI_INT, send_parts_num_v, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    int offset = 0;
+    for (int i = 0; i < num_procs; i++) {
+        displys[i] = offset;
+        offset += send_parts_num_v[i]; 
+    }
+    if (rank == 0) {
+        assert(offset == num_parts);
+        // for (int i = 0; i < num_procs; i++) {
+        //     printf("send_cnt:%d displys:%d\n", send_parts_num_v[i], displys[i]);
+        // }
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Gatherv(send_buf, send_parts_num, PARTICLE, parts, send_parts_num_v, displys, PARTICLE, 0, MPI_COMM_WORLD);
     // 根进程从每个进程接收数据，按照rank排列在revc_buf中，每个进程发送数据个数是send_parts_num，根进程从每个进程接收的数据个数也是send_parts_num
-    MPI_Gather(send_buf, send_parts_num, PARTICLE, parts, send_parts_num, PARTICLE, 0, MPI_COMM_WORLD);
+    // MPI_Gather(send_buf, send_parts_num, PARTICLE, parts, send_parts_num, PARTICLE, 0, MPI_COMM_WORLD);
+    // printf("rank %d finish gather\n", rank);
     // 按照id升序排序
     if (rank == 0) {
         std::sort(parts, parts + num_parts, [](particle_t &a, particle_t &b) {
             return a.id < b.id;
         });
     }
+    MPI_Barrier(MPI_COMM_WORLD);
 }
